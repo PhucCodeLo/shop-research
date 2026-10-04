@@ -59,9 +59,11 @@ function parseDdgHtml(html: string): WebResult[] {
 
 async function fetchViaProxy(targetUrl: string): Promise<string> {
   const errors: string[] = [];
+  const encoded = encodeURIComponent(targetUrl);
   const urls = [
-    "https://api.allorigins.win/raw?url=" + encodeURIComponent(targetUrl),
-    "https://api.allorigins.win/get?url=" + encodeURIComponent(targetUrl),
+    "https://api.cors.lol/?url=" + encoded,
+    "https://api.allorigins.win/raw?url=" + encoded,
+    "https://api.allorigins.win/get?url=" + encoded,
   ];
   for (const u of urls) {
     try {
