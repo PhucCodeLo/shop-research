@@ -1,6 +1,9 @@
-// Tìm kiếm web qua DuckDuckGo HTML, đi qua CORS proxy công cộng allorigins.win
-// (miễn phí, không cần key) vì DDG chặn trực tiếp IP datacenter (Vercel).
-// Không scrape trang bán hàng — chỉ dùng kết quả tìm kiếm công khai.
+// Tìm kiếm web qua Bing RSS (https://www.bing.com/search?format=rss).
+// - Không cần API key, không billing, không proxy.
+// - Chạy trực tiếp từ Vercel (đã kiểm chứng: 200 trong ~170ms,
+//   trong khi DuckDuckGo trả 403 với IP datacenter).
+// - Dùng setlang=vi để Bing hiểu đúng tiếng Việt.
+// Chỉ dùng kết quả tìm kiếm công khai, không scrape trang bán hàng.
 
 import { WebResult } from "./types";
 
@@ -23,79 +26,61 @@ export function sourceTypeOf(url: string): string {
   return "review";
 }
 
-function decodeDdgHref(href: string): string | null {
-  const uddg = href.match(/[?&]uddg=([^&]+)/);
-  if (uddg) {
-    try {
-      href = decodeURIComponent(uddg[1]);
-    } catch {
-      return null;
-    }
-  }
-  if (!/^https?:\/\//.test(href) || /duckduckgo\.com/.test(href)) return null;
-  return href;
+function unescapeXml(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/<[^>]+>/g, "")
+    .trim();
 }
 
-function parseDdgHtml(html: string): WebResult[] {
+function parseBingRss(xml: string): WebResult[] {
   const out: WebResult[] = [];
-  const re = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  const sre = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
-  const snippets: string[] = [];
-  let sm: RegExpExecArray | null;
-  while ((sm = sre.exec(html))) {
-    snippets.push(sm[1].replace(/<[^>]+>/g, "").trim().slice(0, 400));
-  }
+  const itemRe = /<item>([\s\S]*?)<\/item>/g;
   let m: RegExpExecArray | null;
-  let i = 0;
-  while ((m = re.exec(html)) && out.length < 8) {
-    const href = decodeDdgHref(m[1]);
-    const title = m[2].replace(/<[^>]+>/g, "").trim().slice(0, 120);
-    if (!href || !title) continue;
-    out.push({ title, url: href, snippet: snippets[i] || "", source: domainOf(href) });
-    i++;
+  while ((m = itemRe.exec(xml)) && out.length < 8) {
+    const item = m[1];
+    const title = /<title>([\s\S]*?)<\/title>/.exec(item);
+    const link = /<link>([\s\S]*?)<\/link>/.exec(item);
+    const desc = /<description>([\s\S]*?)<\/description>/.exec(item);
+    const url = link ? unescapeXml(link[1]) : "";
+    const titleText = title ? unescapeXml(title[1]).slice(0, 120) : "";
+    if (!/^https?:\/\//.test(url) || !titleText) continue;
+    if (/bing\.com/.test(url)) continue;
+    out.push({
+      title: titleText,
+      url,
+      snippet: desc ? unescapeXml(desc[1]).slice(0, 400) : "",
+      source: domainOf(url),
+    });
   }
   return out;
 }
 
-async function fetchViaProxy(targetUrl: string): Promise<string> {
-  const errors: string[] = [];
-  const encoded = encodeURIComponent(targetUrl);
-  const urls = [
-    "https://api.cors.lol/?url=" + encoded,
-    "https://api.allorigins.win/raw?url=" + encoded,
-    "https://api.allorigins.win/get?url=" + encoded,
-  ];
-  for (const u of urls) {
-    try {
-      const res = await fetch(u, {
-        headers: { "User-Agent": "shop-research-agent/1.0" },
-        signal: AbortSignal.timeout(15000),
-      });
-      if (!res.ok) throw new Error("proxy " + res.status);
-      if (u.includes("/get?")) {
-        const data = await res.json();
-        const contents = (data?.contents || "").toString();
-        if (contents.length > 1000) return contents;
-        throw new Error("proxy empty");
-      }
-      const text = await res.text();
-      if (text.length > 1000) return text;
-      throw new Error("proxy empty");
-    } catch (e) {
-      errors.push((e as Error).message);
-    }
-  }
-  throw new Error(errors.join(" / "));
+export async function bingRssSearch(query: string): Promise<WebResult[]> {
+  const url =
+    "https://www.bing.com/search?format=rss&setlang=vi&q=" +
+    encodeURIComponent(query);
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) shop-research-agent/1.0",
+      Accept: "application/rss+xml, application/xml, text/xml",
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!res.ok) throw new Error("bing " + res.status);
+  const xml = await res.text();
+  const results = parseBingRss(xml);
+  if (!results.length) throw new Error("bing empty");
+  return results;
 }
 
 async function searchOne(query: string): Promise<WebResult[]> {
   try {
-    const html = await fetchViaProxy(
-      "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query)
-    );
-    const results = parseDdgHtml(html);
-    if (!results.length) throw new Error("no results");
-    return results;
+    return await bingRssSearch(query);
   } catch (e) {
     console.error("search failed:", query.slice(0, 40), (e as Error).message);
     return [];
@@ -123,7 +108,8 @@ export function buildQueries(
       .trim();
   const queries = templates.slice(0, 3).map(fill).filter((q) => q.length > 8);
   if (use) queries.push(`${categoryVi} tốt nhất cho ${use} ${budget}`.trim());
-  queries.push(`mua ${categoryVi} ${budget} giá tốt chính hãng`.trim());
+  // "nên mua" đặt cuối câu để Bing không đọc nhầm "mua" thành chữ viết tắt MUA
+  queries.push(`${categoryVi} ${budget} giá tốt chính hãng nên mua`.trim());
   // Truy vấn tiếng Anh để bắt tên model cụ thể từ review quốc tế
   if (categoryEn && categoryEn !== "products") {
     queries.push(`best budget ${categoryEn} 2026 review`);

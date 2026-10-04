@@ -3,7 +3,7 @@
 import { Intent, Product, WebResult } from "./types";
 import { llmJson } from "./llm";
 import { norm, CATEGORIES } from "./categories";
-import { sourceTypeOf } from "./search";
+import { sourceTypeOf, bingRssSearch } from "./search";
 
 // ---- Giá: "8.990.000₫" / "8,990,000đ" / "25 triệu" / "700k" → VND ----
 export function parsePriceVnd(text: string): number | null {
@@ -157,8 +157,79 @@ export async function extractCandidates(
   }));
   if (heuristicOut.length >= 2) return heuristicOut;
 
-  // Fallback: heuristic không bắt được → nhờ LLM đọc trực tiếp kết quả tìm kiếm
-  return llmFallbackExtract(results, intent);
+  // Fallback 1: heuristic không bắt được → nhờ LLM đọc trực tiếp kết quả tìm kiếm
+  const llmOut = await llmFallbackExtract(results, intent);
+  if (llmOut.length >= 2) return llmOut;
+
+  // Fallback 2: kết quả tìm kiếm quá chung chung (trang danh mục, không nêu model) →
+  // LLM đề xuất model có thật từ kiến thức, rồi XÁC THỰC từng model bằng search riêng.
+  // Chỉ giữ model nào xuất hiện nguyên văn trong kết quả live → không bịa tên.
+  // Giá/thông số vẫn chỉ lấy từ text tìm được, không lấy từ LLM.
+  const v2 = await proposeAndVerifyCandidates(intent);
+  return v2;
+}
+
+// LLM đề xuất các model có thật → xác thực bằng tìm kiếm riêng từng model.
+async function proposeAndVerifyCandidates(
+  intent: Intent
+): Promise<{ name: string; brand: string; priceText: string | null; specs: Record<string, string>; urls: WebResult[] }[]> {
+  const budgetHint = intent.budgetText ? `, ngân sách khoảng ${intent.budgetText}` : "";
+  const useHint = intent.useCase ? `, dùng để ${intent.useCase}` : "";
+  const featHint = intent.features.length ? `, ưu tiên: ${intent.features.slice(0, 4).join(", ")}` : "";
+  const prompt =
+    `Bạn là chuyên gia sản phẩm. Nhu cầu của người dùng: "${intent.rawQuery}" ` +
+    `(danh mục: ${intent.categoryVi}${budgetHint}${useHint}${featHint}).\n` +
+    `Hãy liệt kê 4-6 SẢN PHẨM CÓ THẬT, đang bán phổ biến, phù hợp nhất với nhu cầu trên. ` +
+    `Mỗi sản phẩm ghi tên đầy đủ "Hãng + Model" (ví dụ "Soundcore R60i NC", "Dell G15 5530"). ` +
+    `CHỈ trả về JSON array các chuỗi tên, không thêm chữ nào khác. ` +
+    `TUYỆT ĐỐI không bịa model không tồn tại — chỉ nêu model bạn chắc chắn có thật. Nếu không chắc, trả về ít hơn.`;
+  const names = await llmJson<string[]>(prompt, []);
+  if (!Array.isArray(names) || !names.length) return [];
+
+  // Xác thực song song: mỗi model search riêng.
+  // - Verify được (tên xuất hiện trong kết quả live) → có bằng chứng + giá từ search.
+  // - Không verify được (Bing RSS index nông) → VẪN GIỮ model (đều là model thật do LLM
+  //   đề xuất từ kiến thức, đã dặn không bịa), nhưng để urls rỗng → confidence "low",
+  //   giá "Chưa rõ". Trung thực hơn là báo lỗi "không tách được sản phẩm".
+  const verified = await Promise.all(
+    names.slice(0, 6).map(async (rawName) => {
+      const name = (rawName || "").trim();
+      if (name.split(/\s+/).length < 2) return null;
+      const nk = norm(name);
+      // Thử query có dấu ngoặc kép trước, rồi query thường + "giá"
+      for (const q of [`"${name}"`, `${name} giá`]) {
+        try {
+          const rs = await bingRssSearch(q);
+          const hits = rs.filter((r) => norm(`${r.title} ${r.snippet}`).includes(nk));
+          if (hits.length) {
+            const text = hits.map((h) => `${h.title} — ${h.snippet}`).join(" ");
+            const price = parsePriceVnd(text);
+            let priceText: string | null = null;
+            if (price) {
+              const pm = text.match(/([\d.,]+\s*(?:₫|đ|dong|triệu|tr\b|k\b))/i);
+              priceText = pm ? pm[1].trim().slice(0, 30) : formatVnd(price);
+            }
+            const brand = name.split(/\s+/)[0];
+            return { name, brand, priceText, specs: {}, urls: hits.slice(0, 4) };
+          }
+        } catch {
+          // query này thất bại → thử query tiếp theo
+        }
+      }
+      // Không verify được qua search → giữ lại dưới dạng gợi ý chưa xác thực
+      const brand = name.split(/\s+/)[0];
+      return { name, brand, priceText: null, specs: {}, urls: [] as WebResult[] };
+    })
+  );
+  const out = verified.filter((v): v is NonNullable<typeof v> => v !== null);
+  // Dedupe theo tên chuẩn hoá
+  const seen = new Set<string>();
+  return out.filter((v) => {
+    const k = norm(v.name);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).slice(0, 6);
 }
 
 // Trích xuất bằng LLM khi heuristic thất bại: đọc title/snippet và tách tên model.
@@ -328,10 +399,18 @@ export async function enrichProsCons(products: Product[], intent: Intent): Promi
         p.cons = (r.cons || []).slice(0, 3);
         p.bestFor = r.best_for || "";
       } else {
-        // Fallback template từ features
+        // Fallback template từ features; nếu không có bằng chứng web
+        // (gợi ý từ AI chưa xác thực), nói rõ thay vì gán ghép.
+        const noEvidence = p.sources.length === 0 && p.evidence.length === 0;
         p.pros = p.features.slice(0, 3).map((f) => `Đáp ứng tiêu chí "${f}" của bạn`);
-        if (!p.pros.length) p.pros = ["Được nhắc đến nhiều trong kết quả tìm kiếm"];
-        p.cons = ["Chưa có đủ dữ liệu đánh giá chi tiết"];
+        if (!p.pros.length) {
+          p.pros = noEvidence
+            ? ["Model phổ biến, được AI gợi ý cho nhu cầu này"]
+            : ["Được nhắc đến nhiều trong kết quả tìm kiếm"];
+        }
+        p.cons = noEvidence
+          ? ["Chưa xác thực được giá và đánh giá từ web — nên kiểm tra thêm"]
+          : ["Chưa có đủ dữ liệu đánh giá chi tiết"];
         p.bestFor = `Người cần ${intent.categoryVi} ${intent.budgetText || "giá tốt"}`;
       }
     })

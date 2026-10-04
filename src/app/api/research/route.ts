@@ -180,6 +180,15 @@ export async function POST(req: NextRequest) {
 
     const session: SessionState = { intent, products };
 
+    // Nếu không có ứng viên nào được xác thực qua web (toàn bộ là gợi ý từ AI),
+    // nói rõ để người dùng tự kiểm tra giá/nơi bán.
+    const allUnverified = products.length > 0 && products.every((p) => p.sources.length === 0);
+    const dataNote = allUnverified
+      ? "Các sản phẩm dưới đây là gợi ý từ AI dựa trên các model có thật, phổ biến cho nhu cầu của bạn. " +
+        "Web search lần này không trả về trang sản phẩm cụ thể nên giá ghi \"Chưa rõ\" — bạn nên kiểm tra giá và nơi bán trước khi quyết định nhé!"
+      : "Giá và thông số lấy từ kết quả web công khai tại thời điểm tìm kiếm, luôn kèm nguồn. " +
+        "AI không bịa giá/thông số — mục nào chưa xác thực được sẽ ghi rõ. Nên kiểm tra lại giá trước khi mua.";
+
     return NextResponse.json({
       ok: true,
       steps,
@@ -189,9 +198,7 @@ export async function POST(req: NextRequest) {
       whyBest,
       bestCons: best?.cons || [],
       comparisonTable,
-      dataNote:
-        "Giá và thông số lấy từ kết quả web công khai tại thời điểm tìm kiếm, luôn kèm nguồn. " +
-        "AI không bịa giá/thông số — mục nào chưa xác thực được sẽ ghi rõ. Nên kiểm tra lại giá trước khi mua.",
+      dataNote,
       session,
       durationMs: Date.now() - t0,
     } satisfies ResearchResult);
