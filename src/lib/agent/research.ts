@@ -35,13 +35,16 @@ export function formatVnd(v: number | null): string | null {
 export async function extractCandidates(
   results: WebResult[],
   intent: Intent,
-  brands: string[]
+  brands: string[],
+  deepNormalize = true // pha 2 có thể bỏ qua để tiết kiệm thời gian
 ): Promise<{ name: string; brand: string; priceText: string | null; specs: Record<string, string>; urls: WebResult[] }[]> {
   const allBrands = [...new Set([...brands, ...CATEGORIES.flatMap((c) => c.brands), "Anker", "Redmi", "Baseus", "Edifier", "Marshall"])];
   interface Mention { name: string; brand: string; count: number; urls: WebResult[]; priceText: string | null }
   const mentions = new Map<string, Mention>();
 
-  const STOPWORDS = new Set(["thus", "with", "from", "that", "this", "these", "those", "are", "was", "were", "has", "have", "will", "would", "review", "reviews", "price", "best", "new", "top", "vs", "and", "the", "for", "pure", "vi", "vn", "viet", "nam", "vietnam"]);
+  const STOPWORDS = new Set(["thus", "with", "from", "that", "this", "these", "those", "are", "was", "were", "has", "have", "will", "would", "review", "reviews", "price", "best", "new", "top", "vs", "and", "the", "for", "pure", "vi", "vn", "viet", "nam", "vietnam",
+    // Từ tiếng Việt thường gặp trong tiêu đề (không phải model)
+    "tai", "nghe", "bluetooth", "khong", "day", "chong", "on", "gia", "tot", "nhat", "moi", "chinh", "hang", "ban", "mua", "danh", "cho", "cua", "cao", "cap", "tws", "day"]);
 
   for (const r of results) {
     const text = `${r.title} — ${r.snippet}`;
@@ -59,6 +62,14 @@ export async function extractCandidates(
         // Bỏ token cuối nếu là stopword; bỏ hẳn nếu toàn stopword
         let toks = model.split(/\s+/).filter(Boolean);
         while (toks.length && STOPWORDS.has(toks[toks.length - 1].toLowerCase().replace(/[^a-z]/g, ""))) {
+          toks.pop();
+        }
+        // Bỏ token cuối quá ngắn (<3 ký tự, không có số) — thường là mảnh vụn ("Ch", "X")
+        // nhưng giữ lại token có số ("NC" trong "R60i NC" được giữ nhờ token trước có số... chỉ giữ nếu model còn ≥2 token)
+        while (toks.length > 1 && toks[toks.length - 1].length < 3 && !/[0-9]/.test(toks[toks.length - 1])) {
+          // Ngoại lệ: giữ "NC"/"Pro" nếu token trước đó có số (vd "R60i NC")
+          const prev = toks[toks.length - 2] || "";
+          if (/[0-9]/.test(prev) && /^(nc|pro|max|plus|lite)$/i.test(toks[toks.length - 1])) break;
           toks.pop();
         }
         if (!toks.length) continue;
@@ -120,7 +131,7 @@ export async function extractCandidates(
   }
 
   // LLM chuẩn hoá tên (nhanh, 1 call) — fallback giữ nguyên nếu lỗi
-  if (merged.length >= 2) {
+  if (deepNormalize && merged.length >= 2) {
     const normPrompt =
       `Dưới đây là các tên sản phẩm được trích xuất tự động, có thể trùng lặp hoặc sai chính tả. ` +
       `Hãy CHỈ trả về JSON array các tên CHUẨN đã gộp trùng, giữ nguyên tên đúng nhất. ` +
@@ -265,7 +276,7 @@ export function scoreProducts(
 // Ưu/nhược điểm bằng LLM từ bằng chứng (fallback template)
 export async function enrichProsCons(products: Product[], intent: Intent): Promise<void> {
   await Promise.all(
-    products.slice(0, 4).map(async (p) => {
+    products.slice(0, 3).map(async (p) => {
       const evText = p.evidence.slice(0, 5).join("\n");
       const prompt =
         `Bạn là chuyên gia đánh giá sản phẩm. Dựa CHỈ vào bằng chứng dưới đây về "${p.name}" (nhu cầu người dùng: "${intent.rawQuery}"), ` +

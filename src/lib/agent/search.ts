@@ -1,6 +1,6 @@
-// Tìm kiếm web qua Brave Search API.
-// Yêu cầu BRAVE_API_KEY (free tier 2.000 query/tháng, không cần billing).
-// Đăng ký tại https://brave.com/search/api/
+// Tìm kiếm web qua DuckDuckGo HTML, đi qua CORS proxy công cộng allorigins.win
+// (miễn phí, không cần key) vì DDG chặn trực tiếp IP datacenter (Vercel).
+// Không scrape trang bán hàng — chỉ dùng kết quả tìm kiếm công khai.
 
 import { WebResult } from "./types";
 
@@ -23,46 +23,77 @@ export function sourceTypeOf(url: string): string {
   return "review";
 }
 
-export function isSearchConfigured(): boolean {
-  return !!process.env.BRAVE_API_KEY;
+function decodeDdgHref(href: string): string | null {
+  const uddg = href.match(/[?&]uddg=([^&]+)/);
+  if (uddg) {
+    try {
+      href = decodeURIComponent(uddg[1]);
+    } catch {
+      return null;
+    }
+  }
+  if (!/^https?:\/\//.test(href) || /duckduckgo\.com/.test(href)) return null;
+  return href;
 }
 
-async function braveSearch(query: string): Promise<WebResult[]> {
-  const key = process.env.BRAVE_API_KEY;
-  if (!key) throw new Error("missing_key");
-  const res = await fetch(
-    "https://api.search.brave.com/res/v1/web/search?" +
-      new URLSearchParams({ q: query, count: "10", country: "VN", search_lang: "vi" }),
-    {
-      headers: {
-        "X-Subscription-Token": key,
-        Accept: "application/json",
-        "User-Agent": "shop-research-agent/1.0",
-      },
-      signal: AbortSignal.timeout(12000),
-    }
-  );
-  if (!res.ok) throw new Error("brave " + res.status);
-  const data = await res.json();
-  const items = data?.web?.results || [];
+function parseDdgHtml(html: string): WebResult[] {
   const out: WebResult[] = [];
-  for (const it of items.slice(0, 8)) {
-    const url = (it.url || "").toString();
-    const title = (it.title || "").toString().trim().slice(0, 120);
-    if (!/^https?:\/\//.test(url) || !title) continue;
-    out.push({
-      title,
-      url,
-      snippet: (it.description || "").toString().trim().slice(0, 400),
-      source: domainOf(url),
-    });
+  const re = /class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+  const sre = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+  const snippets: string[] = [];
+  let sm: RegExpExecArray | null;
+  while ((sm = sre.exec(html))) {
+    snippets.push(sm[1].replace(/<[^>]+>/g, "").trim().slice(0, 400));
+  }
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = re.exec(html)) && out.length < 8) {
+    const href = decodeDdgHref(m[1]);
+    const title = m[2].replace(/<[^>]+>/g, "").trim().slice(0, 120);
+    if (!href || !title) continue;
+    out.push({ title, url: href, snippet: snippets[i] || "", source: domainOf(href) });
+    i++;
   }
   return out;
 }
 
+async function fetchViaProxy(targetUrl: string): Promise<string> {
+  const errors: string[] = [];
+  const urls = [
+    "https://api.allorigins.win/raw?url=" + encodeURIComponent(targetUrl),
+    "https://api.allorigins.win/get?url=" + encodeURIComponent(targetUrl),
+  ];
+  for (const u of urls) {
+    try {
+      const res = await fetch(u, {
+        headers: { "User-Agent": "shop-research-agent/1.0" },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error("proxy " + res.status);
+      if (u.includes("/get?")) {
+        const data = await res.json();
+        const contents = (data?.contents || "").toString();
+        if (contents.length > 1000) return contents;
+        throw new Error("proxy empty");
+      }
+      const text = await res.text();
+      if (text.length > 1000) return text;
+      throw new Error("proxy empty");
+    } catch (e) {
+      errors.push((e as Error).message);
+    }
+  }
+  throw new Error(errors.join(" / "));
+}
+
 async function searchOne(query: string): Promise<WebResult[]> {
   try {
-    return await braveSearch(query);
+    const html = await fetchViaProxy(
+      "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query)
+    );
+    const results = parseDdgHtml(html);
+    if (!results.length) throw new Error("no results");
+    return results;
   } catch (e) {
     console.error("search failed:", query.slice(0, 40), (e as Error).message);
     return [];
@@ -96,7 +127,7 @@ export function buildQueries(
     queries.push(`best budget ${categoryEn} 2026 review`);
     if (feature) queries.push(`best ${categoryEn} ${feature} 2026`.trim());
   }
-  return [...new Set(queries)].slice(0, 6);
+  return [...new Set(queries)].slice(0, 5);
 }
 
 export async function multiSearch(queries: string[]): Promise<WebResult[]> {

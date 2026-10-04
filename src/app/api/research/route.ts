@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Intent, ResearchResult, SessionState, Product } from "@/lib/agent/types";
 import { extractIntent, classifyFollowUp } from "@/lib/agent/intent";
-import { buildQueries, multiSearch, isSearchConfigured } from "@/lib/agent/search";
+import { buildQueries, multiSearch } from "@/lib/agent/search";
 import { extractCandidates, attachEvidence, scoreProducts, enrichProsCons, formatVnd } from "@/lib/agent/research";
 import { detectCategory, CATEGORIES } from "@/lib/agent/categories";
 import { llmText } from "@/lib/agent/llm";
@@ -88,15 +88,7 @@ export async function POST(req: NextRequest) {
     const queries = buildQueries(intent.categoryVi, cat.en, intent.budgetText, [...intent.features, ...intent.mustHave], intent.useCase, cat.queryTemplates);
     steps.push(`Lập kế hoạch: ${queries.length} truy vấn web từ nhiều nguồn (hãng, nhà bán lẻ, review, cộng đồng)…`);
 
-    // --- Bước 3: Tìm kiếm đa nguồn ---
-    if (!isSearchConfigured()) {
-      return NextResponse.json({
-        ok: false,
-        error: "Chưa cấu hình khoá tìm kiếm (BRAVE_API_KEY). Chủ website cần thêm biến môi trường BRAVE_API_KEY rồi deploy lại.",
-        steps, intent, best: null, alternatives: [], whyBest: [], bestCons: [],
-        comparisonTable: null, dataNote: "", session: null, durationMs: Date.now() - t0,
-      } satisfies ResearchResult);
-    }
+    // --- Bước 3: Tìm kiếm đa nguồn (qua proxy, không cần key) ---
     let results = await multiSearch(queries);
     if (!results.length) {
       return NextResponse.json({
@@ -108,20 +100,9 @@ export async function POST(req: NextRequest) {
     steps.push(`Thu thập ${results.length} kết quả từ ${new Set(results.map((r) => r.source)).size} nguồn khác nhau…`);
 
     // --- Bước 4: Trích xuất & dedupe ứng viên ---
+    // (Bỏ pha 2 tìm sâu để vừa giới hạn 60s của Vercel Hobby —
+    //  5 truy vấn pha 1 đã đủ dữ liệu cho hầu hết nhu cầu.)
     let candidates = await extractCandidates(results, intent, cat.brands);
-
-    // Pha 2: với ứng viên có tên model rõ ràng, tìm sâu thêm review + giá
-    const hasRealName = (n: string) =>
-      /[0-9]/.test(n) || n.trim().split(/\s+/).length >= 3;
-    const named = candidates.filter((c) => hasRealName(c.name)).slice(0, 4);
-    if (named.length >= 2) {
-      steps.push(`Tìm sâu thêm về ${named.length} ứng viên nổi bật (review, giá)…`);
-      const deep = await multiSearch(named.map((c) => `${c.name} review giá`));
-      if (deep.length) {
-        results = [...results, ...deep];
-        candidates = await extractCandidates(results, intent, cat.brands);
-      }
-    }
 
     // Lọc rác: tên quá ngắn hoặc chung chung
     candidates = candidates.filter((c) => {

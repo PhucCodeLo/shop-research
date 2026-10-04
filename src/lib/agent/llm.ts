@@ -1,7 +1,7 @@
 // LLM client qua Pollinations (miễn phí, không cần key).
 // Mọi lời gọi đều có timeout + fallback, không bao giờ làm sập request.
 
-const LLM_TIMEOUT_MS = 25000;
+const LLM_TIMEOUT_MS = 20000;
 
 export async function llmJson<T>(prompt: string, fallback: T): Promise<T> {
   try {
