@@ -89,11 +89,66 @@ export async function bingRssSearch(query: string): Promise<WebResult[]> {
 
 async function searchOne(query: string): Promise<WebResult[]> {
   try {
-    return await bingRssSearch(query);
+    return await webSearch(query);
   } catch (e) {
     console.error("search failed:", query.slice(0, 40), (e as Error).message);
     return [];
   }
+}
+
+// Tìm kiếm thống nhất: ưu tiên Serper (kết quả Google, tiếng Việt chuẩn)
+// nếu có SERPER_API_KEY, fallback về Bing RSS khi không có key hoặc Serper lỗi.
+export async function webSearch(query: string): Promise<WebResult[]> {
+  const key = process.env.SERPER_API_KEY;
+  if (key) {
+    try {
+      return await serperSearch(query, key);
+    } catch (e) {
+      console.error("serper failed, fallback to bing:", (e as Error).message);
+    }
+  }
+  return bingRssSearch(query);
+}
+
+// Serper.dev — Google Search API (miễn phí 2.500 query/tháng).
+// gl=vn + hl=vi để có kết quả tiếng Việt cho thị trường VN.
+async function serperSearch(query: string, apiKey: string): Promise<WebResult[]> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch("https://google.serper.dev/search", {
+        method: "POST",
+        headers: {
+          "X-API-KEY": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ q: query, gl: "vn", hl: "vi", num: 10 }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error("serper " + res.status);
+      const data = (await res.json()) as {
+        organic?: { title?: string; link?: string; snippet?: string }[];
+      };
+      const out: WebResult[] = [];
+      for (const r of data.organic || []) {
+        if (!r.link || !r.title || !/^https?:\/\//.test(r.link)) continue;
+        if (/google\.com/.test(r.link)) continue;
+        out.push({
+          title: r.title.slice(0, 120),
+          url: r.link,
+          snippet: (r.snippet || "").slice(0, 400),
+          source: domainOf(r.link),
+        });
+        if (out.length >= 8) break;
+      }
+      if (!out.length) throw new Error("serper empty");
+      return out;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("serper failed");
 }
 
 // Tạo chiến lược tìm kiếm theo danh mục + ý định

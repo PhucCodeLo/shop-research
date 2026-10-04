@@ -3,7 +3,7 @@
 import { Intent, Product, WebResult } from "./types";
 import { llmJson } from "./llm";
 import { norm, CATEGORIES } from "./categories";
-import { sourceTypeOf, bingRssSearch } from "./search";
+import { sourceTypeOf, webSearch } from "./search";
 
 // ---- Giá: "8.990.000₫" / "8,990,000đ" / "25 triệu" / "700k" → VND ----
 export function parsePriceVnd(text: string): number | null {
@@ -199,7 +199,7 @@ async function proposeAndVerifyCandidates(
       // Thử query có dấu ngoặc kép trước, rồi query thường + "giá"
       for (const q of [`"${name}"`, `${name} giá`]) {
         try {
-          const rs = await bingRssSearch(q);
+          const rs = await webSearch(q);
           const hits = rs.filter((r) => norm(`${r.title} ${r.snippet}`).includes(nk));
           if (hits.length) {
             const text = hits.map((h) => `${h.title} — ${h.snippet}`).join(" ");

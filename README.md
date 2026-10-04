@@ -29,9 +29,9 @@ Câu hỏi tiếng Việt
   → extractIntent (LLM, fallback heuristic): danh mục, ngân sách, tính năng, mức độ ưu tiên
   → buildQueries: 4–6 truy vấn web theo danh mục (19 danh mục: điện thoại, laptop,
                    tai nghe, đồ gia dụng, giày, thời trang, mỹ phẩm, xe, quà tặng…)
-  → multiSearch: tìm kiếm song song qua DuckDuckGo HTML
-     (đi qua CORS proxy công cộng allorigins.win — miễn phí, không key —
-      vì DDG chặn trực tiếp IP datacenter như Vercel)
+  → multiSearch: tìm kiếm song song — ưu tiên **Serper** (kết quả Google, `gl=vn`/`hl=vi`
+     cho tiếng Việt chuẩn) khi có `SERPER_API_KEY`, fallback về **Bing RSS** công khai
+     (không key — đã kiểm chứng chạy được từ IP datacenter Vercel, nơi DuckDuckGo trả 403)
   → extractCandidates: heuristic "Hãng + Model" trong tiêu đề/snippet, LLM gộp trùng tên
   → attachEvidence: gom bằng chứng (snippet) theo từng sản phẩm
   → scoreProducts: chấm điểm cá nhân hoá — khớp yêu cầu, ngân sách, giá trị P/P,
@@ -45,7 +45,7 @@ Mã nguồn chính:
 - `src/app/api/research/route.ts` — workflow agent (7 bước), `maxDuration = 120`
 - `src/lib/agent/intent.ts` — hiểu ý định + phân loại follow-up
 - `src/lib/agent/categories.ts` — 19 danh mục, từ khoá nhận diện, mẫu truy vấn, ngân sách
-- `src/lib/agent/search.ts` — tìm kiếm DuckDuckGo HTML qua proxy, phân loại nguồn
+- `src/lib/agent/search.ts` — tìm kiếm web (Serper/Google ưu tiên, Bing RSS fallback), phân loại nguồn
 - `src/lib/agent/research.ts` — trích xuất ứng viên, chấm điểm, ưu/nhược điểm
 - `src/lib/agent/llm.ts` — client LLM qua Pollinations (miễn phí, không key), luôn có fallback
 - `src/app/page.tsx` — giao diện tiếng Việt, responsive, mobile-friendly
@@ -64,8 +64,12 @@ Giá luôn ghi rõ loại: giá niêm yết / giá tham khảo / giá tìm đư�
 
 ## Biến môi trường
 
-**Không cần API key nào để chạy.**
-- Web search: DuckDuckGo HTML qua CORS proxy công cộng `allorigins.win` (miễn phí).
+**Khuyến nghị:** `SERPER_API_KEY` — đăng ký miễn phí tại https://serper.dev
+(2.500 lượt/tháng, không cần billing), thêm vào Vercel
+(Project → Settings → Environment Variables). Khi có key, app dùng kết quả
+Google với locale Việt Nam (`gl=vn`, `hl=vi`) — chính xác và ổn định hơn hẳn.
+
+**Không có key vẫn chạy:** tự động fallback về Bing RSS công khai (không key).
 - LLM: Pollinations (miễn phí, không cần key).
 
 `.env.example` có sẵn các biến tuỳ chọn nếu muốn thay LLM riêng:
@@ -104,6 +108,6 @@ Yêu cầu: Node.js 20+.
   (ví dụ biến thể tên gần giống nhau); đang cải thiện bằng LLM gộp trùng.
 - LLM miễn phí (Pollinations) đôi khi chậm, trả về tiếng Việt chưa mượt, hoặc từ chối
   — mọi bước đều có fallback heuristic/template nên app không sập.
-- Web search đi qua proxy công cộng allorigins.win (vì DuckDuckGo chặn IP datacenter);
-  nếu proxy chậm/sập, kết quả có thể ít hơn hoặc báo lỗi thân thiện.
+- Web search ưu tiên Serper (Google, `gl=vn`/`hl=vi`); khi chưa có key hoặc Serper lỗi,
+  tự fallback về Bing RSS công khai. Nếu cả hai đều không trả kết quả, app báo lỗi thân thiện.
 - Chưa có cache, chưa lưu lịch sử server-side (session chỉ giữ ở client trong phiên chat).
