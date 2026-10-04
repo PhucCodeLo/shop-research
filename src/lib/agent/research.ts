@@ -152,9 +152,49 @@ export async function extractCandidates(
     }
   }
 
-  return merged.slice(0, 7).map((e) => ({
+  const heuristicOut = merged.slice(0, 7).map((e) => ({
     name: e.name, brand: e.brand, priceText: e.priceText, specs: {}, urls: e.urls.slice(0, 5),
   }));
+  if (heuristicOut.length >= 2) return heuristicOut;
+
+  // Fallback: heuristic không bắt được → nhờ LLM đọc trực tiếp kết quả tìm kiếm
+  return llmFallbackExtract(results, intent);
+}
+
+// Trích xuất bằng LLM khi heuristic thất bại: đọc title/snippet và tách tên model.
+async function llmFallbackExtract(
+  results: WebResult[],
+  intent: Intent
+): Promise<{ name: string; brand: string; priceText: string | null; specs: Record<string, string>; urls: WebResult[] }[]> {
+  const items = results.slice(0, 14).map((r, i) => ({
+    i, title: r.title, snippet: r.snippet.slice(0, 250), url: r.url,
+  }));
+  if (!items.length) return [];
+  const prompt =
+    `Bạn là trợ lý trích xuất thông tin sản phẩm. Dưới đây là kết quả tìm kiếm web cho nhu cầu: "${intent.rawQuery}" (danh mục: ${intent.categoryVi}).\n` +
+    `Hãy trích xuất 3-7 SẢN PHẨM CỤ THỂ (tên gồm hãng + model, ví dụ "Soundcore R60i NC"). ` +
+    `CHỈ trả về JSON array, không thêm chữ nào khác.\n` +
+    `Mỗi phần tử: {"name":"<tên đầy đủ>","brand":"<hãng>","price_text":"<giá thấy trong text hoặc null>","result_idx":[<chỉ số>]}\n` +
+    `QUY TẮC: không bịa tên/giá. Bỏ qua bài viết chung chung không nêu model cụ thể.\n` +
+    items.map((x) => `[${x.i}] ${x.title} | ${x.snippet}`).join("\n");
+  interface LP { name?: string; brand?: string; price_text?: string | null; result_idx?: number[] }
+  const llm = await llmJson<LP[]>(prompt, null as unknown as LP[]);
+  if (!Array.isArray(llm)) return [];
+  const seen = new Set<string>();
+  const out: { name: string; brand: string; priceText: string | null; specs: Record<string, string>; urls: WebResult[] }[] = [];
+  for (const p of llm) {
+    const name = (p.name || "").trim();
+    if (!name || name.split(/\s+/).length < 2) continue;
+    const key = norm(name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const urls = (Array.isArray(p.result_idx) ? p.result_idx : [])
+      .filter((i) => typeof i === "number" && results[i])
+      .map((i) => results[i as number]);
+    out.push({ name, brand: (p.brand || "").trim() || "Không rõ", priceText: p.price_text || null, specs: {}, urls: urls.slice(0, 4) });
+    if (out.length >= 6) break;
+  }
+  return out;
 }
 
 // Gom bằng chứng: gom snippet theo sản phẩm
