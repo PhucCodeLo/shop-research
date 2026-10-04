@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { Intent, ResearchResult, SessionState, Product } from "@/lib/agent/types";
 import { extractIntent, classifyFollowUp } from "@/lib/agent/intent";
-import { buildQueries, multiSearch } from "@/lib/agent/search";
+import { buildQueries, multiSearch, isSearchConfigured } from "@/lib/agent/search";
 import { extractCandidates, attachEvidence, scoreProducts, enrichProsCons, formatVnd } from "@/lib/agent/research";
 import { detectCategory, CATEGORIES } from "@/lib/agent/categories";
 import { llmText } from "@/lib/agent/llm";
@@ -88,7 +88,15 @@ export async function POST(req: NextRequest) {
     const queries = buildQueries(intent.categoryVi, cat.en, intent.budgetText, [...intent.features, ...intent.mustHave], intent.useCase, cat.queryTemplates);
     steps.push(`Lập kế hoạch: ${queries.length} truy vấn web từ nhiều nguồn (hãng, nhà bán lẻ, review, cộng đồng)…`);
 
-    // --- Bước 3: Tìm kiếm đa nguồn (2 pha) ---
+    // --- Bước 3: Tìm kiếm đa nguồn ---
+    if (!isSearchConfigured()) {
+      return NextResponse.json({
+        ok: false,
+        error: "Chưa cấu hình khoá tìm kiếm (BRAVE_API_KEY). Chủ website cần thêm biến môi trường BRAVE_API_KEY rồi deploy lại.",
+        steps, intent, best: null, alternatives: [], whyBest: [], bestCons: [],
+        comparisonTable: null, dataNote: "", session: null, durationMs: Date.now() - t0,
+      } satisfies ResearchResult);
+    }
     let results = await multiSearch(queries);
     if (!results.length) {
       return NextResponse.json({

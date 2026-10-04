@@ -29,7 +29,7 @@ Câu hỏi tiếng Việt
   → extractIntent (LLM, fallback heuristic): danh mục, ngân sách, tính năng, mức độ ưu tiên
   → buildQueries: 4–6 truy vấn web theo danh mục (19 danh mục: điện thoại, laptop,
                    tai nghe, đồ gia dụng, giày, thời trang, mỹ phẩm, xe, quà tặng…)
-  → multiSearch: tìm kiếm song song qua DuckDuckGo HTML (công khai, không key)
+  → multiSearch: tìm kiếm song song qua Brave Search API (JSON sạch, key free tier)
   → extractCandidates: heuristic "Hãng + Model" trong tiêu đề/snippet, LLM gộp trùng tên
   → attachEvidence: gom bằng chứng (snippet) theo từng sản phẩm
   → scoreProducts: chấm điểm cá nhân hoá — khớp yêu cầu, ngân sách, giá trị P/P,
@@ -43,7 +43,7 @@ Mã nguồn chính:
 - `src/app/api/research/route.ts` — workflow agent (7 bước), `maxDuration = 120`
 - `src/lib/agent/intent.ts` — hiểu ý định + phân loại follow-up
 - `src/lib/agent/categories.ts` — 19 danh mục, từ khoá nhận diện, mẫu truy vấn, ngân sách
-- `src/lib/agent/search.ts` — tìm kiếm DuckDuckGo HTML, phân loại nguồn
+- `src/lib/agent/search.ts` — tìm kiếm Brave Search API, phân loại nguồn
 - `src/lib/agent/research.ts` — trích xuất ứng viên, chấm điểm, ưu/nhược điểm
 - `src/lib/agent/llm.ts` — client LLM qua Pollinations (miễn phí, không key), luôn có fallback
 - `src/app/page.tsx` — giao diện tiếng Việt, responsive, mobile-friendly
@@ -62,7 +62,11 @@ Giá luôn ghi rõ loại: giá niêm yết / giá tham khảo / giá tìm đư�
 
 ## Biến môi trường
 
-**Không cần API key nào để chạy.** LLM dùng Pollinations (miễn phí, không cần key).
+**Bắt buộc:** `BRAVE_API_KEY` — key miễn phí tại https://brave.com/search/api/
+(gói free 2.000 query/tháng, không cần thẻ/billing). Không có key, API research
+sẽ báo lỗi thân thiện yêu cầu cấu hình.
+
+LLM dùng Pollinations (miễn phí, không cần key).
 
 `.env.example` có sẵn các biến tuỳ chọn nếu muốn thay LLM riêng:
 
@@ -87,7 +91,8 @@ Yêu cầu: Node.js 20+.
 
 ## Triển khai
 
-- **Vercel**: project Next.js chuẩn, không cần biến môi trường. Lưu ý API route có thể chạy
+- **Vercel**: project Next.js chuẩn. **Bắt buộc** thêm biến môi trường `BRAVE_API_KEY`
+  (Settings → Environment Variables) rồi redeploy. Lưu ý API route có thể chạy
   tới ~60–90s cho mỗi nghiên cứu (nhiều lượt tìm kiếm + gọi LLM) — gói Hobby giới hạn
   60s/function cho một số region, cân nhắc gói Pro hoặc rút gọn số truy vấn khi deploy.
 - **GitHub**: push source lên repo rồi import vào Vercel (khuyến nghị).
@@ -100,6 +105,6 @@ Yêu cầu: Node.js 20+.
   (ví dụ biến thể tên gần giống nhau); đang cải thiện bằng LLM gộp trùng.
 - LLM miễn phí (Pollinations) đôi khi chậm, trả về tiếng Việt chưa mượt, hoặc từ chối
   — mọi bước đều có fallback heuristic/template nên app không sập.
-- DuckDuckGo HTML có thể giới hạn tần suất nếu gọi quá nhiều; app đã có retry im lặng
-  từng truy vấn và thông báo thân thiện khi không tìm được gì.
+- Web search dùng Brave Search API (gói free 2.000 query/tháng). Hết quota hoặc sai key
+  → API trả lỗi rõ ràng, không bịa kết quả.
 - Chưa có cache, chưa lưu lịch sử server-side (session chỉ giữ ở client trong phiên chat).
