@@ -64,18 +64,27 @@ export async function bingRssSearch(query: string): Promise<WebResult[]> {
   const url =
     "https://www.bing.com/search?format=rss&setlang=vi&q=" +
     encodeURIComponent(query);
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) shop-research-agent/1.0",
-      Accept: "application/rss+xml, application/xml, text/xml",
-    },
-    signal: AbortSignal.timeout(15000),
-  });
-  if (!res.ok) throw new Error("bing " + res.status);
-  const xml = await res.text();
-  const results = parseBingRss(xml);
-  if (!results.length) throw new Error("bing empty");
-  return results;
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) shop-research-agent/1.0",
+          Accept: "application/rss+xml, application/xml, text/xml",
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!res.ok) throw new Error("bing " + res.status);
+      const xml = await res.text();
+      const results = parseBingRss(xml);
+      if (!results.length) throw new Error("bing empty");
+      return results;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("search failed");
 }
 
 async function searchOne(query: string): Promise<WebResult[]> {
