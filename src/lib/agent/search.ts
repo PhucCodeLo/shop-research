@@ -22,6 +22,19 @@ export function sourceTypeOf(url: string): string {
   return "review";
 }
 
+function decodeDdgHref(href: string): string | null {
+  const uddg = href.match(/[?&]uddg=([^&]+)/);
+  if (uddg) {
+    try {
+      href = decodeURIComponent(uddg[1]);
+    } catch {
+      return null;
+    }
+  }
+  if (!/^https?:\/\//.test(href) || /duckduckgo\.com/.test(href)) return null;
+  return href;
+}
+
 async function ddgSearch(query: string): Promise<WebResult[]> {
   const res = await fetch(
     "https://html.duckduckgo.com/html/?q=" + encodeURIComponent(query),
@@ -45,21 +58,101 @@ async function ddgSearch(query: string): Promise<WebResult[]> {
   let m: RegExpExecArray | null;
   let i = 0;
   while ((m = re.exec(html)) && out.length < 8) {
-    let href = m[1];
+    const href = decodeDdgHref(m[1]);
     const title = m[2].replace(/<[^>]+>/g, "").trim().slice(0, 120);
-    const uddg = href.match(/[?&]uddg=([^&]+)/);
-    if (uddg) {
-      try {
-        href = decodeURIComponent(uddg[1]);
-      } catch {
-        continue;
-      }
-    }
-    if (!/^https?:\/\//.test(href) || /duckduckgo\.com/.test(href) || !title) continue;
+    if (!href || !title) continue;
     out.push({ title, url: href, snippet: snippets[i] || "", source: domainOf(href) });
     i++;
   }
   return out;
+}
+
+// Backend dự phòng: DuckDuckGo Lite (ít bị chặn hơn từ datacenter)
+async function ddgLiteSearch(query: string): Promise<WebResult[]> {
+  const res = await fetch(
+    "https://lite.duckduckgo.com/lite/?q=" + encodeURIComponent(query),
+    {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) shop-research-agent/1.0",
+      },
+      signal: AbortSignal.timeout(10000),
+    }
+  );
+  if (!res.ok) throw new Error("ddg-lite " + res.status);
+  const html = await res.text();
+  const out: WebResult[] = [];
+  const linkRe = /<a[^>]*href="([^"]+)"[^>]*class='result-link'[^>]*>([\s\S]*?)<\/a>/g;
+  const snipRe = /<td class='result-snippet'[^>]*>([\s\S]*?)<\/td>/g;
+  const snippets: string[] = [];
+  let sm: RegExpExecArray | null;
+  while ((sm = snipRe.exec(html))) {
+    snippets.push(sm[1].replace(/<[^>]+>/g, "").trim().slice(0, 400));
+  }
+  let m: RegExpExecArray | null;
+  let i = 0;
+  while ((m = linkRe.exec(html)) && out.length < 8) {
+    const href = decodeDdgHref(m[1]);
+    const title = m[2].replace(/<[^>]+>/g, "").trim().slice(0, 120);
+    if (!href || !title) continue;
+    out.push({ title, url: href, snippet: snippets[i] || "", source: domainOf(href) });
+    i++;
+  }
+  if (!out.length) throw new Error("ddg-lite empty");
+  return out;
+}
+
+// Backend chính khi có BRAVE_API_KEY (free tier 2.000 query/tháng, không cần billing):
+// JSON sạch, chạy ổn định từ mọi IP kể cả datacenter.
+async function braveSearch(query: string): Promise<WebResult[]> {
+  const key = process.env.BRAVE_API_KEY;
+  if (!key) throw new Error("no brave key");
+  const res = await fetch(
+    "https://api.search.brave.com/res/v1/web/search?" +
+      new URLSearchParams({ q: query, count: "10", country: "VN", search_lang: "vi" }),
+    {
+      headers: {
+        "X-Subscription-Token": key,
+        Accept: "application/json",
+        "User-Agent": "shop-research-agent/1.0",
+      },
+      signal: AbortSignal.timeout(12000),
+    }
+  );
+  if (!res.ok) throw new Error("brave " + res.status);
+  const data = await res.json();
+  const items = data?.web?.results || [];
+  const out: WebResult[] = [];
+  for (const it of items.slice(0, 8)) {
+    const url = (it.url || "").toString();
+    const title = (it.title || "").toString().trim().slice(0, 120);
+    if (!/^https?:\/\//.test(url) || !title) continue;
+    out.push({
+      title,
+      url,
+      snippet: (it.description || "").toString().trim().slice(0, 400),
+      source: domainOf(url),
+    });
+  }
+  if (!out.length) throw new Error("brave empty");
+  return out;
+}
+
+async function searchOne(query: string): Promise<WebResult[]> {
+  const attempts: [string, (q: string) => Promise<WebResult[]>][] = [
+    ["brave", braveSearch],
+    ["ddg", ddgSearch],
+    ["ddg-lite", ddgLiteSearch],
+  ];
+  const errors: string[] = [];
+  for (const [name, fn] of attempts) {
+    try {
+      return await fn(query);
+    } catch (e) {
+      errors.push(`${name}:${(e as Error).message}`);
+    }
+  }
+  console.error("search failed:", query.slice(0, 40), errors.join(" / "));
+  return [];
 }
 
 // Tạo chiến lược tìm kiếm theo danh mục + ý định
@@ -93,14 +186,7 @@ export function buildQueries(
 }
 
 export async function multiSearch(queries: string[]): Promise<WebResult[]> {
-  const all = await Promise.all(
-    queries.map((q) =>
-      ddgSearch(q).catch((e) => {
-        console.error("search failed:", q.slice(0, 40), (e as Error).message);
-        return [] as WebResult[];
-      })
-    )
-  );
+  const all = await Promise.all(queries.map((q) => searchOne(q)));
   const seen = new Set<string>();
   const out: WebResult[] = [];
   for (const list of all) {
